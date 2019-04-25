@@ -1,0 +1,206 @@
+---
+title: "Fall and Movement Detection Project"
+output:
+  pdf_document: default
+---
+
+# Introduction
+
+Falls among the elderly is an important health issue. Fall detection and movement tracking are therefore instrumental in addressing this issue. This project responds to the challenge of classifying different movements as a part of a system designed to fulfill the need for a wearable device to collect data for fall and near-fall analysis. Four different fall trajectories (forward, backward, left and right), three normal activities (standing, walking and lying down) and near-fall situations are identified and detected.
+
+Falls are a serious public health problem and possibly life threatening for people in fall risk groups. Data was collected by 3 researches wearable motion sensor units fitted to the subjects’ body at six different positions. Fourteen volunteers perform a standardized set of movements including 20 voluntary falls and 16 activities of daily living (ADLs), resulting in a large dataset with 2520 trials. To reduce the computational complexity of training and testing the classifiers, data focus on the raw data for each sensor in a 4 s time window.
+
+## Dataset
+Data set that can be found here (https://www.dropbox.com/s/e2hc5rinwkectsp/falldeteciton.csv?dl=1) contains around 16.4k records, each record contains multiple biometric measures: Sugar Level (SL), EEG monitoring rate (EEG), Blood Pressure (BP), Heart Beat Rate (HR), and Blood Circulation (CIRCLUATION). Record is classified also by activity with a timestamp, 6 activities was noted in this data set: Standing, Walking, Sitting, Falling, Cramps, and Running.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+#############################################################
+# Create dataset and validation set
+#############################################################
+
+# Note: this process could take few seconds
+
+if(!require(ellipse)) install.packages("ellipse")
+if(!require(data.table)) install.packages("data.table")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+# Download dataset file
+dl <- tempfile()
+download.file("https://www.dropbox.com/s/e2hc5rinwkectsp/falldeteciton.csv?dl=1", dl)
+# load the CSV file from the temp file
+dataset <- read.csv(dl, header=FALSE)
+# set the column names in the dataset
+colnames(dataset) <- c("ACTIVITY","TIME","SL","EEG","BP","HR","CIRCLUATION")
+```
+
+We are going to hold back some data that the algorithms will not get to see and we will use this data to get a second and independent idea of how accurate the best model might actually be.
+
+We will split the loaded dataset into two, 80% of which we will use to train our models and 20% that we will hold back as a validation dataset.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+# create a list of 80% of the rows in the original dataset we can use for training
+validation_index <- createDataPartition(dataset$ACTIVITY, p=0.80, list=FALSE)
+# select 20% of the data for validation
+validation <- dataset[-validation_index,]
+# use the remaining 80% of data to training and testing the models
+dataset <- dataset[validation_index,]
+```
+
+We now have training data in the dataset variable and a validation set we will use later in the validation variable.
+
+
+#Data Exploration and visualization
+
+We can get a quick idea of how many instances (rows) and how many attributes (columns) the data contains with the dim function.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+dim(dataset)
+```
+
+Knowing the types is important as it will give us an idea of how to better summarize the data we have and the types of transforms we might need to use to prepare the data before we model it.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+sapply(dataset, class)
+```
+
+It is also always a good idea to actually eyeball our data.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+head(dataset)
+```
+
+The activity variable is a factor. This is a multi-class or a multinomial classification problem.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+levels(dataset$ACTIVITY)
+```
+
+Let’s now take a look at the number of instances (rows) that belong to each class
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+percentage <- prop.table(table(dataset$ACTIVITY)) * 100
+cbind(freq=table(dataset$ACTIVITY), percentage=percentage)
+```
+
+Now finally, we can take a look at a summary of each attribute.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+summary(dataset)
+```
+
+It is helpful with visualization to have a way to refer to just the input attributes and just the output attributes.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+x <- dataset[,3:7]
+y <- dataset[,1]
+```
+
+We can create a barplot of the Activity class variable to get a graphical representation of the class distribution.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+plot(y)
+```
+
+Given that the input variables are numeric, we can create scatterplots of each.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+par(mfrow=c(1,5))
+for(i in 1:5) {
+  boxplot(x[,i], main=names(x)[i])
+}
+```
+
+First let’s look at scatterplots of all pairs of attributes and color the points by class.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+featurePlot(x=x, y=y, plot="pairs")
+```
+
+Next we can get an idea of the distribution of each attribute broken down by class value. We will use some probability density plots to give nice smooth lines for each distribution.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+featurePlot(x=x, y=y, plot="density", scales=scales)
+```
+
+We will 10-fold crossvalidation to estimate accuracy.
+
+This will split our dataset into 10 parts, train in 9 and test on 1 and release for all combinations of train-test splits. We will also repeat the process 3 times for each algorithm with different splits of the data into 10 groups, in an effort to get a more accurate estimate.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+control <- trainControl(method="cv", number=10)
+metric <- "Accuracy"
+```
+
+We are using the metric of “Accuracy” to evaluate models. This is a ratio of the number of correctly predicted instances in divided by the total number of instances in the dataset multiplied by 100 to give a percentage (e.g. 95% accurate). We will be using the metric variable when we run build and evaluate each model next.
+
+#Modeling
+
+We don’t know which algorithm would be good on this problem or what configurations to use. Let’s evaluate 4 different algorithms:
+
+    1- Linear Discriminant Analysis (LDA)
+    2- Classification and Regression Trees (CART).
+    3- k-Nearest Neighbors (kNN).
+    4- Random Forest (RF)
+
+This is a good mixture of simple linear (LDA), nonlinear (CART, kNN) and complex nonlinear method (RF). We reset the random number seed before reach run to ensure that the evaluation of each algorithm is performed using exactly the same data splits. It ensures the results are directly comparable.
+
+## a) linear algorithms
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+set.seed(7)
+fit.lda <- train(ACTIVITY~., data=dataset, method="lda", metric=metric, trControl=control)
+```
+
+## b) nonlinear algorithms
+### CART
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+set.seed(7)
+fit.cart <- train(ACTIVITY~., data=dataset, method="rpart", metric=metric, trControl=control)
+```
+### kNN
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+set.seed(7)
+fit.knn <- train(ACTIVITY~., data=dataset, method="knn", metric=metric, trControl=control)
+```
+### Random Forest
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+# This may take few minutes to complete
+set.seed(7)
+fit.rf <- train(ACTIVITY~., data=dataset, method="rf", metric=metric, trControl=control)
+```
+
+#Results
+
+We now have 4 models and accuracy estimations for each. We need to compare the models to each other and select the most accurate.
+
+We can report on the accuracy of each model by first creating a list of the created models and using the summary function.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+results <- resamples(list(lda=fit.lda, cart=fit.cart, knn=fit.knn, rf=fit.rf))
+summary(results)
+```
+
+We can also create a plot of the model evaluation results and compare the spread and the mean accuracy of each model.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+dotplot(results)
+```
+
+The results for just the RF model can be summarized. This gives a nice summary of what was used to train the model and the mean and standard deviation (SD) accuracy achieved.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+print(fit.rf)
+```
+
+The RF was the most accurate model. Now we want to get an idea of the accuracy of the model on our validation set.This will give us an independent final check on the accuracy of the best model. We can run the LDA model directly on the validation set and summarize the results in a confusion matrix.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+predictions <- predict(fit.rf, validation)
+confusionMatrix(predictions, validation$ACTIVITY)
+```
+
+#Conclusion
+We  have built a an algorithm to predict fall and movement type.
+
+We have tested multiple methods to build models to predict and found that RF was the best one to use, it gives the best accuracy for our example.
